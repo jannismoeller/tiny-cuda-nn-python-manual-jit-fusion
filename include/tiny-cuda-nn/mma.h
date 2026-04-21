@@ -330,7 +330,7 @@ struct alignas(16) mma_mat {
 
 	TCNN_DEVICE void activate_bwd(Activation act, const mma_mat<M, N, LAYOUT>& fwd_in) {
 		using vec_t = tvec<__half, N_ELEMS, 16>;
-		*(vec_t*)this = vec_activation_backward_in(act, *(vec_t*)this, *(vec_t*)&fwd_in);
+		*(vec_t*)this = vec_activation_backward(act, *(vec_t*)this, *(const vec_t*)&fwd_in);
 	}
 
 	// Comptime specializations of activation functions that make use of __half2 intrinsics
@@ -345,7 +345,7 @@ struct alignas(16) mma_mat {
 	template <Activation act, std::enable_if_t<act != Activation::None && act != Activation::ReLU, int> = 0>
 	TCNN_DEVICE void activate_bwd(const mma_mat<M, N, LAYOUT>& fwd_in) {
 		using vec_t = tvec<__half, N_ELEMS, 16>;
-		*(vec_t*)this = vec_activation_backward_in<act, __half, N_ELEMS, 16>(*(vec_t*)this, *(const vec_t*)&fwd_in);
+		*(vec_t*)this = vec_activation_backward(act, *(vec_t*)this, *(const vec_t*)&fwd_in);
 	}
 
 	template <Activation act, std::enable_if_t<act == Activation::None, int> = 0>
