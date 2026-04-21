@@ -11,6 +11,7 @@ import importlib
 import os
 import tempfile
 import warnings
+from contextlib import contextmanager
 
 import torch
 
@@ -91,6 +92,16 @@ def rtc_set_cache_dir(dir):
 	# `str` to handle pathlib.Path objects
 	_C.rtc_set_cache_dir(str(dir))
 
+def rtc_set_include_dir(dir):
+
+	if not os.path.isdir(dir):
+		warnings.warn(f"Missing RTC include directory {dir}")
+	
+	if not any(f.endswith(".cuh") or f.endswith(".h") for f in os.listdir(dir)):
+		warnings.warn(f"RTC include directory {dir} does not contain any .cuh or .h files.")
+
+	_C.rtc_set_include_dir(str(dir))
+
 # Set up JIT runtime compilation
 _rtc_dir = os.path.join(os.path.dirname(__file__), "rtc")
 
@@ -102,7 +113,7 @@ try:
 	os.makedirs(_rtc_cache_dir, exist_ok=True)
 	rtc_set_cache_dir(_rtc_cache_dir)
 except OSError:
-	pass
+	warnings.warn(f"Could not create RTC cache directory {_rtc_cache_dir}. JIT fusion may be slow.")
 
 def _torch_precision(tcnn_precision):
 	if tcnn_precision == _C.Precision.Fp16:
@@ -259,6 +270,76 @@ class Module(torch.nn.Module):
 	def jit_fusion(self):
 		raise AttributeError("`jit_fusion` can not be deleted")
 
+	def generate_device_function(self, name="model_fun"):
+		"""Generate CUDA device function code for the model's forward pass.
+
+		The returned string contains a `__device__` function that can be
+		embedded into a custom CUDA kernel compiled via `CudaRtcKernel`.
+		All 32 threads of a warp must be active when calling the generated
+		function.
+
+		Parameters
+		----------
+		name : `str`
+			Name of the generated device function.
+
+		Returns
+		-------
+		`str`
+			CUDA source code of the device function.
+		"""
+		return self.native_tcnn_module.generate_device_function(name).replace("\t", "    ").strip()
+
+	def generate_backward_device_function(self, name="model_fun_bwd", n_threads=128):
+		"""Generate CUDA device function code for the model's backward pass.
+
+		Parameters
+		----------
+		name : `str`
+			Name of the generated device function.
+		n_threads : `int`
+			Number of threads per block (must match the launch configuration).
+
+		Returns
+		-------
+		`str`
+			CUDA source code of the backward device function.
+		"""
+		return self.native_tcnn_module.generate_backward_device_function(name, n_threads).replace("\t", "    ").strip()
+
+	@contextmanager
+	def jit_params(self):
+		"""Context manager that yields params in JIT (MMA) layout.
+
+		Casts model parameters to native precision, points the model's
+		internal buffers at them, converts to MMA fragment layout, and
+		yields the resulting tensor. The conversion is reversed on exit.
+
+		Example
+		-------
+		>>> with model.jit_params() as params:
+		...     kernel(blocks, threads, 0, [n, input, output, params])
+		"""
+		jit_p = self.params.data.to(dtype=self.dtype).contiguous()
+		self.native_tcnn_module.set_params(jit_p)
+		self.native_tcnn_module.convert_params_to_jit_layout()
+		try:
+			yield jit_p
+		finally:
+			self.native_tcnn_module.convert_params_from_jit_layout()
+
+	def device_function_fwd_ctx_bytes(self):
+		"""Returns the size in bytes of the context required for the device function's forward pass.
+
+		This is useful for allocating the correct amount of memory when using the generated device functions in custom CUDA kernels.
+
+		Returns
+		-------
+		int
+			The size in bytes of the forward context.
+		"""
+		return self.native_tcnn_module.device_function_fwd_ctx_bytes()
+
 class NetworkWithInputEncoding(Module):
 	"""
 	Input encoding, followed by a neural network.
@@ -380,3 +461,64 @@ class Encoding(Module):
 
 	def _native_tcnn_module(self):
 		return _C.create_encoding(self.n_input_dims, self.encoding_config, self.precision)
+
+class CudaRtcKernel:
+	"""Compile and launch a custom CUDA kernel at runtime using NVRTC.
+
+	This class wraps tiny-cuda-nn's runtime compilation infrastructure,
+	which handles header resolution, compiler flags, and PTX caching
+	automatically.
+
+	Use `Module.generate_device_function` to obtain device function code
+	that can be embedded in your kernel source.
+
+	Kernel arguments are passed as a list. Supported types:
+	  - `torch.Tensor` — passed as a device pointer
+	  - `int` — passed as `uint32_t`
+	  - `float` — passed as `float`
+
+	Parameters
+	----------
+	name : `str`
+		Name of the `__global__` function in `kernel_code`.
+	kernel_code : `str`
+		CUDA source code containing the kernel.
+
+	Example
+	-------
+	>>> device_fn = model.generate_device_function("model_fun")
+	>>> kernel = tcnn.CudaRtcKernel("my_kernel", f'''
+	...     {device_fn}
+	...     __global__ void my_kernel(uint32_t n, const __half* in, __half* out, const __half* params) {{
+	...         uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
+	...         // All 32 warp threads must reach the model_fun call.
+	...         if (__all_sync(0xFFFFFFFF, i >= n)) return;
+	...         auto input = ...;
+	...         auto output = model_fun(input, params);
+	...         if (i < n) {{ /* store output */ }}
+	...     }}
+	... ''')
+	>>> with model.jit_params() as params:
+	...     kernel.launch(blocks, 128, 0, [n, in_tensor, out_tensor, params])
+	"""
+	def __init__(self, name, kernel_code):
+		self._kernel = _C.CudaRtcKernel(name, kernel_code)
+
+	def launch(self, blocks, threads, shmem_size, args):
+		"""Launch the kernel.
+
+		Parameters
+		----------
+		blocks : `int` or `tuple`
+			Grid dimensions. An int for 1D, or a tuple of up to 3 ints.
+		threads : `int` or `tuple`
+			Block dimensions. An int for 1D, or a tuple of up to 3 ints.
+		shmem_size : `int`
+			Dynamic shared memory size in bytes.
+		args : `list`
+			Kernel arguments as a list of `torch.Tensor`, `int`, or `float`.
+		"""
+		self._kernel.launch(blocks, threads, shmem_size, args)
+
+	def __call__(self, blocks, threads, shmem_size, args):
+		self.launch(blocks, threads, shmem_size, args)

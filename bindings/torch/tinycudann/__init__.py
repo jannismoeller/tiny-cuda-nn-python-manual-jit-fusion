@@ -6,6 +6,6 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
-from tinycudann.modules import supports_jit_fusion, free_temporary_memory, NetworkWithInputEncoding, Network, Encoding
+from tinycudann.modules import supports_jit_fusion, rtc_set_cache_dir, rtc_set_include_dir, free_temporary_memory, NetworkWithInputEncoding, Network, Encoding, CudaRtcKernel
 
-__all__ = ["supports_jit_fusion", "free_temporary_memory", "NetworkWithInputEncoding", "Network", "Encoding"]
+__all__ = ["supports_jit_fusion", "rtc_set_cache_dir", "rtc_set_include_dir", "free_temporary_memory", "NetworkWithInputEncoding", "Network", "Encoding", "CudaRtcKernel"]

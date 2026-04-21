@@ -148,6 +148,30 @@ public:
 	bool jit_fusion() const { return m_model->jit_fusion(); }
 	void set_jit_fusion(bool val) { m_model->set_jit_fusion(val); }
 
+	std::string generate_device_function(const std::string& name) const override {
+		return m_model->generate_device_function(name);
+	}
+
+	std::string generate_backward_device_function(const std::string& name, uint32_t n_threads) const override {
+		return m_model->generate_backward_device_function(name, n_threads);
+	}
+
+	void set_params(void* params) override {
+		m_model->set_params((T*)params, (T*)params, nullptr);
+	}
+
+	void convert_params_to_jit_layout(cudaStream_t stream) override {
+		m_model->convert_params_to_jit_layout(stream, false);
+	}
+
+	void convert_params_from_jit_layout(cudaStream_t stream) override {
+		m_model->convert_params_from_jit_layout(stream, false);
+	}
+
+	uint32_t device_function_fwd_ctx_bytes() const {
+	    return m_model->device_function_fwd_ctx_bytes();
+	}
+
 private:
 	std::shared_ptr<tcnn::DifferentiableObject<float, T, T>> m_model;
 };

@@ -59,20 +59,23 @@ public:
 
 	void set(CUfunction_attribute attr, int value);
 
-	template <typename ... Types>
-	void launch(dim3 blocks, dim3 threads, uint32_t shmem_size, cudaStream_t stream, Types&&... args) {
+	void launch(dim3 blocks, dim3 threads, uint32_t shmem_size, cudaStream_t stream, void** args) {
 		if (blocks.x * blocks.y * blocks.z == 0 || threads.x * threads.y * threads.z == 0) {
 			return;
 		}
-
-		const void* args_array[sizeof...(Types)] = { &args... };
 
 		// CUDA docs state that one has to opt-in for larger amounts of shmem than 48KiB == 49'152B
 		if (shmem_size > 49152) {
 			set(CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, shmem_size);
 		}
 
-		CU_CHECK_THROW(cuLaunchKernel(m_kernel, blocks.x, blocks.y, blocks.z, threads.x, threads.y, threads.z, shmem_size, stream, (void**)args_array, nullptr));
+		CU_CHECK_THROW(cuLaunchKernel(m_kernel, blocks.x, blocks.y, blocks.z, threads.x, threads.y, threads.z, shmem_size, stream, args, nullptr));
+	}
+
+	template <typename ... Types>
+	void launch(dim3 blocks, dim3 threads, uint32_t shmem_size, cudaStream_t stream, Types&&... args) {
+		void* args_array[sizeof...(Types)] = { (void*)&args... };
+		launch(blocks, threads, shmem_size, stream, args_array);
 	}
 
 	template <typename ... Types>

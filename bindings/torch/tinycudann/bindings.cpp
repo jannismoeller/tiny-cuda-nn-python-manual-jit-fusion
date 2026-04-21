@@ -47,6 +47,7 @@
 #include <pybind11/functional.h>
 
 #include <tiny-cuda-nn/cpp_api.h>
+#include <tiny-cuda-nn/rtc_kernel.h>
 
 #define STRINGIFY(x) #x
 #define STR(x) STRINGIFY(x)
@@ -263,8 +264,104 @@ public:
 	bool jit_fusion() const { return m_module->jit_fusion(); }
 	void set_jit_fusion(bool val) { m_module->set_jit_fusion(val); }
 
+	std::string generate_device_function(const std::string& name) const {
+		return m_module->generate_device_function(name);
+	}
+
+	std::string generate_backward_device_function(const std::string& name, uint32_t n_threads) const {
+		return m_module->generate_backward_device_function(name, n_threads);
+	}
+
+	void set_params(torch::Tensor params) {
+		CHECK_INPUT(params);
+		CHECK_THROW(params.scalar_type() == c10_param_precision());
+		m_module->set_params(void_data_ptr(params));
+	}
+
+	void convert_params_to_jit_layout() {
+		const at::cuda::CUDAGuard device_guard{at::cuda::current_device()};
+		cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+		m_module->convert_params_to_jit_layout(stream);
+	}
+
+	void convert_params_from_jit_layout() {
+		const at::cuda::CUDAGuard device_guard{at::cuda::current_device()};
+		cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+		m_module->convert_params_from_jit_layout(stream);
+	}
+
+	uint32_t device_function_fwd_ctx_bytes() const {
+		return m_module->device_function_fwd_ctx_bytes();
+	}
+
 private:
 	std::unique_ptr<tcnn::cpp::Module> m_module;
+};
+
+class CudaRtcKernelWrapper {
+public:
+	CudaRtcKernelWrapper(const std::string& name, const std::string& kernel_code)
+		: m_kernel{std::make_unique<tcnn::CudaRtcKernel>(name, kernel_code)} {}
+
+	void launch(py::object blocks_obj, py::object threads_obj, uint32_t shmem_size, py::list args) {
+		const at::cuda::CUDAGuard device_guard{at::cuda::current_device()};
+		cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+		dim3 blocks = to_dim3(blocks_obj);
+		dim3 threads = to_dim3(threads_obj);
+
+		// Storage for kernel arguments. Each entry holds either a scalar or a pointer.
+		// We need stable addresses for cuLaunchKernel, so we pre-allocate.
+		struct ArgStorage {
+			union {
+				uint32_t u32;
+				float f32;
+				void* ptr;
+			};
+		};
+
+		std::vector<ArgStorage> storage(args.size());
+		std::vector<void*> arg_ptrs(args.size());
+
+		for (size_t i = 0; i < args.size(); ++i) {
+			auto arg = args[i];
+			if (THPVariable_Check(arg.ptr())) {
+				auto t = THPVariable_Unpack(arg.ptr());
+				CHECK_THROW(t.device().is_cuda());
+				CHECK_THROW(t.is_contiguous());
+				storage[i].ptr = t.data_ptr();
+				arg_ptrs[i] = &storage[i].ptr;
+			} else if (py::isinstance<py::float_>(arg)) {
+				storage[i].f32 = py::cast<float>(arg);
+				arg_ptrs[i] = &storage[i].f32;
+			} else if (py::isinstance<py::int_>(arg)) {
+				storage[i].u32 = py::cast<uint32_t>(arg);
+				arg_ptrs[i] = &storage[i].u32;
+			} else {
+				throw std::runtime_error{"CudaRtcKernel::launch: unsupported argument type at index " + std::to_string(i) + ". Expected torch.Tensor, int, or float."};
+			}
+		}
+
+		m_kernel->launch(blocks, threads, shmem_size, stream, arg_ptrs.data());
+	}
+
+private:
+	static dim3 to_dim3(py::object obj) {
+		if (py::isinstance<py::int_>(obj)) {
+			return dim3(py::cast<uint32_t>(obj), 1, 1);
+		} else if (py::isinstance<py::tuple>(obj) || py::isinstance<py::list>(obj)) {
+			auto seq = py::cast<py::sequence>(obj);
+			size_t len = seq.size();
+			CHECK_THROW(len >= 1 && len <= 3);
+			uint32_t x = py::cast<uint32_t>(seq[0]);
+			uint32_t y = len >= 2 ? py::cast<uint32_t>(seq[1]) : 1;
+			uint32_t z = len >= 3 ? py::cast<uint32_t>(seq[2]) : 1;
+			return dim3(x, y, z);
+		}
+		throw std::runtime_error{"blocks/threads must be an int or a tuple of 1-3 ints."};
+	}
+
+	std::unique_ptr<tcnn::CudaRtcKernel> m_kernel;
 };
 
 #if !defined(TCNN_NO_NETWORKS)
@@ -332,6 +429,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 		.def("hyperparams", &Module::hyperparams)
 		.def("name", &Module::name)
 		.def_property("jit_fusion", &Module::jit_fusion, &Module::set_jit_fusion)
+		.def("generate_device_function", &Module::generate_device_function, py::arg("name") = "model_fun")
+		.def("generate_backward_device_function", &Module::generate_backward_device_function, py::arg("name") = "model_fun_bwd", py::arg("n_threads") = 128)
+		.def("set_params", &Module::set_params)
+		.def("convert_params_to_jit_layout", &Module::convert_params_to_jit_layout)
+		.def("convert_params_from_jit_layout", &Module::convert_params_from_jit_layout)
+		.def("device_function_fwd_ctx_bytes", &Module::device_function_fwd_ctx_bytes)
+		;
+
+	py::class_<CudaRtcKernelWrapper>(m, "CudaRtcKernel")
+		.def(py::init<const std::string&, const std::string&>(), py::arg("name"), py::arg("kernel_code"))
+		.def("launch", &CudaRtcKernelWrapper::launch, py::arg("blocks"), py::arg("threads"), py::arg("shmem_size"), py::arg("args"))
 		;
 
 #if !defined(TCNN_NO_NETWORKS)

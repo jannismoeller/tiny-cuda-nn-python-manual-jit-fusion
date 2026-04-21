@@ -139,6 +139,7 @@ CudaRtcKernel::CudaRtcKernel(const std::string& name, const std::string& kernel_
 		"--use_fast_math",
 #endif
 		"--extra-device-vectorization",
+		"--generate-line-info",
 	};
 
 	if (!rtc_include_dir().empty()) {

@@ -113,6 +113,13 @@ public:
 	virtual bool jit_fusion() const = 0;
 	virtual void set_jit_fusion(bool val) = 0;
 
+	virtual std::string generate_device_function(const std::string& name) const = 0;
+	virtual std::string generate_backward_device_function(const std::string& name, uint32_t n_threads) const = 0;
+	virtual void set_params(void* params) = 0;
+	virtual void convert_params_to_jit_layout(cudaStream_t stream) = 0;
+	virtual void convert_params_from_jit_layout(cudaStream_t stream) = 0;
+	virtual uint32_t device_function_fwd_ctx_bytes() const = 0;
+
 private:
 	Precision m_param_precision;
 	Precision m_output_precision;
