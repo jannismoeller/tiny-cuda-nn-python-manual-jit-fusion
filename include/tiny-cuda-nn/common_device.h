@@ -105,7 +105,7 @@ inline __host__ __device__ half relu(half val) {
 #endif
 }
 
-static constexpr float K_ACT = 10.0f;
+static constexpr float K_ACT = 4.0f;
 
 template <typename T, typename fragment_t, Activation activation, std::enable_if_t<activation == Activation::None, int> = 0>
 __host__ __device__ void warp_activation(const fragment_t& frag, fragment_t& result) {
