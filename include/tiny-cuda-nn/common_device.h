@@ -173,7 +173,10 @@ template <typename T, typename fragment_t, Activation activation, std::enable_if
 __host__ __device__ void warp_activation(const fragment_t& frag, fragment_t& result) {
 	TCNN_PRAGMA_UNROLL
 	for (int t=0; t < result.num_elements; t++) {
-		result.x[t] = (T)(logf(expf((float)frag.x[t] * K_ACT) + 1.0f) / K_ACT);
+		// result.x[t] = (T)(logf(expf((float)frag.x[t] * K_ACT) + 1.0f) / K_ACT);
+		// The above implementation can be unstable, better use the switch to linear at x > 20 / K_ACT:
+		float x = (float)frag.x[t];
+		result.x[t] = x < 20.0f / K_ACT ? (T)(logf(expf(x * K_ACT) + 1.0f) / K_ACT) : (T)x;
 	}
 }
 
@@ -300,7 +303,8 @@ __host__ __device__ void warp_activation_backward_in(const fragment_t& frag, con
 	TCNN_PRAGMA_UNROLL
 	for (int t=0; t < result.num_elements; t++) {
 		float tmp = expf((float)forward_frag_in.x[t] * K_ACT);
-		result.x[t] = frag.x[t] * (T)(tmp / (tmp + 1));
+		// same as with the forward pass, we need to switch to linear at x > 20 / K_ACT to avoid instability:
+		result.x[t] = (float)forward_frag_in.x[t] < 20.0f / K_ACT ? frag.x[t] * (T)(tmp / (tmp + 1)) : frag.x[t];
 	}
 }
 
@@ -404,6 +408,8 @@ __host__ __device__ void warp_activation_backward(Activation activation, const f
 		case Activation::Softplus:
 			TCNN_PRAGMA_UNROLL
 			for (int t=0; t < result.num_elements; t++) {
+				// This path receives the post-activation softplus output y (always positive), so
+				// d/dx softplus(x) = 1 - exp(-K_ACT * y) is already stable.
 				result.x[t] = frag.x[t] * (T)(1.0f - expf(-(float)forward_frag.x[t] * K_ACT));
 			}
 			return;
